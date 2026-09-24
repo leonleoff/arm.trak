@@ -1,0 +1,4 @@
+# Pose detection. Pulls in opencv-contrib-python (cv2) and numpy.
+mediapipe>=1.0,<2
+opencv-contrib-python>=5.0
+numpy>=1.26
