@@ -20,7 +20,10 @@ Keys:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
+import os
+import sys
 import time
 import urllib.request
 from collections import deque
@@ -41,6 +44,9 @@ MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "{variant}/float16/latest/{variant}.task"
 )
+
+# Consecutive empty camera reads tolerated before giving up.
+MAX_FAILED_READS = 30
 
 # BGR colours, one per arm.
 COLOR_LEFT = (255, 196, 64)
@@ -238,6 +244,30 @@ def draw_plot(frame: np.ndarray, states: dict[str, ArmState], now: float, window
     )
 
 
+@contextlib.contextmanager
+def suppress_native_stderr(enabled: bool):
+    """Hide MediaPipe's C++ glog chatter, which writes straight to fd 2.
+
+    Python-level redirection never sees it, so the file descriptor itself is
+    swapped out. Only graph setup and the first successful detection are noisy,
+    so callers keep this window as narrow as possible and real errors still
+    reach the terminal. Python exceptions are unaffected either way.
+    """
+    if not enabled:
+        yield
+        return
+    sys.stderr.flush()
+    saved = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(devnull)
+        os.close(saved)
+
+
 def ensure_model(path: Path) -> Path:
     """Download the pose model on first run if it is not present yet."""
     if path.exists():
@@ -280,6 +310,10 @@ def parse_args() -> argparse.Namespace:
         help="time window of the angle history plot (default: 10)",
     )
     parser.add_argument("--no-mirror", action="store_true", help="do not mirror the view")
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="show MediaPipe's native startup logs instead of hiding them",
+    )
     return parser.parse_args()
 
 
@@ -320,16 +354,28 @@ def main() -> None:
     start_time = time.perf_counter()
     last_time = start_time
     last_stamp_ms = -1
+    failed_reads = 0
+    seen_pose = False
+    quiet = not args.verbose
     window_name = "Elbow angle tracker"
 
-    landmarker = build_landmarker(model_path)
+    with suppress_native_stderr(quiet):
+        landmarker = build_landmarker(model_path)
 
     try:
         while True:
             ok, frame = capture.read()
             if not ok:
-                print("Camera frame could not be read, stopping.")
-                break
+                # Some webcams need a moment before they deliver the first frames,
+                # so tolerate a short dropout instead of giving up immediately.
+                failed_reads += 1
+                if failed_reads > MAX_FAILED_READS:
+                    print("Camera stopped delivering frames, exiting.")
+                    break
+                if cv2.waitKey(10) & 0xFF in (ord("q"), 27):
+                    break
+                continue
+            failed_reads = 0
 
             # Detect on the unmirrored frame so MediaPipe's left/right labels stay
             # anatomically correct, then mirror only for display.
@@ -340,7 +386,10 @@ def main() -> None:
             # detect_for_video requires strictly increasing timestamps.
             stamp_ms = max(int((now - start_time) * 1000.0), last_stamp_ms + 1)
             last_stamp_ms = stamp_ms
-            result = landmarker.detect_for_video(image, stamp_ms)
+            # The graph logs a one-off warning on the first pose it finds; keep the
+            # muting until then, and never afterwards.
+            with suppress_native_stderr(quiet and not seen_pose):
+                result = landmarker.detect_for_video(image, stamp_ms)
 
             if mirror:
                 frame = cv2.flip(frame, 1)
@@ -353,6 +402,7 @@ def main() -> None:
 
             visible: dict[str, float] = {}
             pose_found = bool(result.pose_landmarks) and bool(result.pose_world_landmarks)
+            seen_pose = seen_pose or pose_found
 
             if pose_found:
                 image_landmarks = result.pose_landmarks[0]
@@ -410,10 +460,14 @@ def main() -> None:
                 mirror = not mirror
             if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
+    except KeyboardInterrupt:
+        # Ctrl+C is a normal way to stop a live viewer, not a crash.
+        print("Interrupted.")
     finally:
         landmarker.close()
         capture.release()
         cv2.destroyAllWindows()
+        cv2.waitKey(1)  # let the window manager actually tear the window down
 
 
 if __name__ == "__main__":

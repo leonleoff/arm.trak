@@ -58,7 +58,18 @@ stay anatomically correct; only the displayed image is mirrored.
 --min-visibility V    landmark visibility needed to measure an arm (default 0.5)
 --plot-seconds S      time window of the plot (default 10)
 --no-mirror           show the raw, unmirrored camera image
+--verbose             show MediaPipe's native startup logs instead of hiding them
 ```
+
+Stop it with `q` or `ESC` while the video window has focus, or with `Ctrl+C` in
+the terminal -- both shut down cleanly. Note that `q` is read by the video
+window, so it does nothing while the terminal is the focused window.
+
+By default MediaPipe's C++ startup chatter (`Created TensorFlow Lite XNNPACK
+delegate`, `Feedback manager requires ...`, `Using NORM_RECT without
+IMAGE_DIMENSIONS`) is hidden. Those lines are harmless, but they look like
+errors. `--verbose` shows them again; the muting only covers graph setup and
+the frames before the first pose is found, so genuine errors still surface.
 
 If it feels slow, use the smaller model:
 
